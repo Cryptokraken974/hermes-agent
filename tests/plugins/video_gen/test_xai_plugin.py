@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from agent import video_gen_registry
@@ -111,3 +112,38 @@ def test_xai_no_operation_kwarg():
     assert result["success"] is False
     # auth_required, NOT some signature error
     assert result["error_type"] in {"auth_required", "api_error"}
+
+
+@pytest.mark.asyncio
+async def test_xai_poll_treats_transient_http_errors_as_retryable(monkeypatch):
+    """A temporary poll error should not discard an already accepted video job.
+
+    xAI can occasionally return a non-2xx response while a generation is still
+    queued. The poller should keep polling until timeout and surface the last
+    poll error for debugging instead of raising immediately.
+    """
+    import plugins.video_gen.xai as xai_plugin
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(xai_plugin.asyncio, "sleep", fake_sleep)
+
+    transport = httpx.MockTransport(lambda _request: httpx.Response(503, text="upstream overloaded"))
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await xai_plugin._poll(
+            client,
+            "video-request-1",
+            api_key="xai-key",
+            base_url="https://api.x.ai/v1",
+            timeout_seconds=1,
+            poll_interval=1,
+        )
+
+    assert result == {
+        "status": "timeout",
+        "body": {
+            "status": "queued",
+            "last_poll_error": {"http_status": 503, "detail": "upstream overloaded"},
+        },
+    }

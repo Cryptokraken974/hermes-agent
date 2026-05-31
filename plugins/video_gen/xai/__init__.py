@@ -165,14 +165,33 @@ async def _poll(
 ) -> Dict[str, Any]:
     elapsed = 0.0
     last_status = "queued"
+    last_poll_error: Dict[str, Any] = {}
     while elapsed < timeout_seconds:
-        response = await client.get(
-            f"{base_url}/videos/{request_id}",
-            headers=_xai_headers(api_key),
-            timeout=30,
-        )
-        response.raise_for_status()
-        body = response.json()
+        try:
+            response = await client.get(
+                f"{base_url}/videos/{request_id}",
+                headers=_xai_headers(api_key),
+                timeout=30,
+            )
+            if not response.is_success:
+                detail = response.text[:500]
+                last_poll_error = {"http_status": response.status_code, "detail": detail}
+                logger.info(
+                    "xAI video poll for %s returned HTTP %s; continuing until timeout: %s",
+                    request_id,
+                    response.status_code,
+                    detail,
+                )
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+                continue
+            body = response.json()
+        except Exception as exc:
+            last_poll_error = {"exception": str(exc)}
+            logger.info("xAI video poll for %s failed transiently; continuing until timeout: %s", request_id, exc)
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            continue
         last_status = (body.get("status") or "").lower()
 
         if last_status == "done":
@@ -183,7 +202,7 @@ async def _poll(
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
 
-    return {"status": "timeout", "body": {"status": last_status}}
+    return {"status": "timeout", "body": {"status": last_status, "last_poll_error": last_poll_error}}
 
 
 # ---------------------------------------------------------------------------
